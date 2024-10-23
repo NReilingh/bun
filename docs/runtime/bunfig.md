@@ -177,7 +177,7 @@ Whether to skip test files when computing coverage statistics. Default `true`.
 
 ```toml
 [test]
-coverageSkipTestFiles = false
+coverageSkipTestFiles = true
 ```
 
 ## Package manager
