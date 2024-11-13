@@ -39,7 +39,6 @@ const JSInternalPromise = JSC.JSInternalPromise;
 const JSPromise = JSC.JSPromise;
 const JSValue = JSC.JSValue;
 const JSType = JSValue.JSType;
-const JSError = JSC.JSError;
 const JSGlobalObject = JSC.JSGlobalObject;
 const JSObject = JSC.JSObject;
 const CallFrame = JSC.CallFrame;
@@ -1229,22 +1228,6 @@ pub const DescribeScope = struct {
     }
 
     const ScopeStack = ObjectPool(std.ArrayListUnmanaged(*DescribeScope), null, true, 16);
-
-    // pub fn runBeforeAll(this: *DescribeScope, ctx: js.JSContextRef, exception: js.ExceptionRef) bool {
-    //     var scopes = ScopeStack.get(default_allocator);
-    //     defer scopes.release();
-    //     scopes.data.clearRetainingCapacity();
-    //     var cur: ?*DescribeScope = this;
-    //     while (cur) |scope| {
-    //         scopes.data.append(default_allocator, this) catch unreachable;
-    //         cur = scope.parent;
-    //     }
-
-    //     // while (scopes.data.popOrNull()) |scope| {
-    //     //     scope.
-    //     // }
-    // }
-
 };
 
 pub fn wrapTestFunction(comptime name: []const u8, comptime func: anytype) DescribeScope.CallbackFn {
@@ -1853,7 +1836,7 @@ inline fn createIfScope(
     }
 
     const name = ZigString.static(property);
-    const value = args[0].toBooleanSlow(globalThis);
+    const value = args[0].toBoolean();
 
     const truthy_falsey = comptime switch (tag) {
         .pass => .{ Scope.skip, Scope.call },

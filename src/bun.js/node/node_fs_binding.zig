@@ -35,30 +35,20 @@ fn callSync(comptime FunctionEnum: NodeFSFunctionEnum) NodeFSFunction {
             globalObject: *JSC.JSGlobalObject,
             callframe: *JSC.CallFrame,
         ) JSC.JSValue {
-            var exceptionref: JSC.C.JSValueRef = null;
-
             var arguments = callframe.arguments(8);
 
             var slice = ArgumentsSlice.init(globalObject.bunVM(), arguments.slice());
             defer slice.deinit();
 
             const args = if (comptime Arguments != void)
-                (Arguments.fromJS(globalObject, &slice, &exceptionref) orelse {
-                    // we might've already thrown
-                    if (exceptionref != null)
-                        globalObject.throwValue(JSC.JSValue.c(exceptionref));
-                    return .zero;
-                })
+                (Arguments.fromJS(globalObject, &slice) catch return .zero)
             else
                 Arguments{};
             defer {
                 if (comptime Arguments != void and @hasDecl(Arguments, "deinit")) args.deinit();
             }
 
-            const exception1 = JSC.JSValue.c(exceptionref);
-
-            if (exception1 != .zero) {
-                globalObject.throwValue(exception1);
+            if (globalObject.hasException()) {
                 return .zero;
             }
             var result = Function(
@@ -94,28 +84,18 @@ fn call(comptime FunctionEnum: NodeFSFunctionEnum) NodeFSFunction {
 
             var slice = ArgumentsSlice.init(globalObject.bunVM(), arguments.slice());
             slice.will_be_async = true;
-            var exceptionref: JSC.C.JSValueRef = null;
             const args = if (comptime Arguments != void)
-                (Arguments.fromJS(globalObject, &slice, &exceptionref) orelse {
-                    // we might've already thrown
-                    if (exceptionref != null)
-                        globalObject.throwValue(JSC.JSValue.c(exceptionref));
+                (Arguments.fromJS(globalObject, &slice) catch {
                     slice.deinit();
                     return .zero;
                 })
             else
                 Arguments{};
 
-            const exception1 = JSC.JSValue.c(exceptionref);
-
-            if (exception1 != .zero) {
-                globalObject.throwValue(exception1);
-
+            if (globalObject.hasException()) {
                 slice.deinit();
                 return .zero;
             }
-
-            // TODO: handle globalObject.throwValue
 
             const Task = @field(JSC.Node.Async, @tagName(FunctionEnum));
             if (comptime FunctionEnum == .cp) {
@@ -259,8 +239,7 @@ pub fn createBinding(globalObject: *JSC.JSGlobalObject) JSC.JSValue {
     const module = NodeJSFS.new(.{});
 
     const vm = globalObject.bunVM();
-    if (vm.standalone_module_graph != null)
-        module.node_fs.vm = vm;
+    module.node_fs.vm = vm;
 
     return module.toJS(globalObject);
 }

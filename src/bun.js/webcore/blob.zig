@@ -27,7 +27,6 @@ const ZigString = JSC.ZigString;
 const IdentityContext = @import("../../identity_context.zig").IdentityContext;
 const JSPromise = JSC.JSPromise;
 const JSValue = JSC.JSValue;
-const JSError = JSC.JSError;
 const JSGlobalObject = JSC.JSGlobalObject;
 const NullableAllocator = bun.NullableAllocator;
 
@@ -49,8 +48,8 @@ const PathOrBlob = union(enum) {
     path: JSC.Node.PathOrFileDescriptor,
     blob: Blob,
 
-    pub fn fromJSNoCopy(ctx: js.JSContextRef, args: *JSC.Node.ArgumentsSlice, exception: js.ExceptionRef) ?PathOrBlob {
-        if (JSC.Node.PathOrFileDescriptor.fromJS(ctx, args, bun.default_allocator, exception)) |path| {
+    pub fn fromJSNoCopy(ctx: js.JSContextRef, args: *JSC.Node.ArgumentsSlice) bun.JSError!?PathOrBlob {
+        if (try JSC.Node.PathOrFileDescriptor.fromJS(ctx, args, bun.default_allocator)) |path| {
             return PathOrBlob{
                 .path = path,
             };
@@ -966,16 +965,10 @@ pub const Blob = struct {
         const arguments = callframe.arguments(3).slice();
         var args = JSC.Node.ArgumentsSlice.init(globalThis.bunVM(), arguments);
         defer args.deinit();
-        var exception_ = [1]JSC.JSValueRef{null};
-        var exception = &exception_;
 
         // accept a path or a blob
-        var path_or_blob = PathOrBlob.fromJSNoCopy(globalThis, &args, exception) orelse {
-            if (exception[0] != null) {
-                globalThis.throwValue(exception[0].?.value());
-            } else {
-                globalThis.throwInvalidArguments("Bun.write expects a path, file descriptor or a blob", .{});
-            }
+        var path_or_blob = (PathOrBlob.fromJSNoCopy(globalThis, &args) catch return .zero) orelse {
+            globalThis.throwInvalidArguments("Bun.write expects a path, file descriptor or a blob", .{});
             return .zero;
         };
         defer {
@@ -1542,7 +1535,7 @@ pub const Blob = struct {
             }
         }
 
-        this.reported_estimated_size = size + (this.content_type.len * @intFromBool(this.content_type_allocated));
+        this.reported_estimated_size = size + (this.content_type.len * @intFromBool(this.content_type_allocated)) + this.name.byteSlice().len;
     }
 
     pub fn estimatedSize(this: *Blob) usize {
@@ -1564,17 +1557,10 @@ pub const Blob = struct {
         const arguments = callframe.arguments(2).slice();
         var args = JSC.Node.ArgumentsSlice.init(vm, arguments);
         defer args.deinit();
-        var exception_ = [1]JSC.JSValueRef{null};
-        const exception = &exception_;
 
-        var path = JSC.Node.PathOrFileDescriptor.fromJS(globalObject, &args, bun.default_allocator, exception) orelse {
-            if (exception_[0] == null) {
-                globalObject.throwInvalidArguments("Expected file path string or file descriptor", .{});
-            } else {
-                globalObject.throwValue(exception_[0].?.value());
-            }
-
-            return .undefined;
+        var path = (JSC.Node.PathOrFileDescriptor.fromJS(globalObject, &args, bun.default_allocator) catch return .zero) orelse {
+            globalObject.throwInvalidArguments("Expected file path string or file descriptor", .{});
+            return .zero;
         };
         defer path.deinitAndUnprotect();
 
@@ -3784,7 +3770,7 @@ pub const Blob = struct {
             return true;
         }
         if (value.isString()) {
-            this.name.deref();
+            const old_name = this.name;
 
             this.name = bun.String.tryFromJS(value, globalThis) orelse {
                 // Handle allocation failure.
@@ -3793,6 +3779,7 @@ pub const Blob = struct {
             };
             // We don't need to increment the reference count since tryFromJS already did it.
             Blob.nameSetCached(jsThis, globalThis, value);
+            old_name.deref();
             return true;
         }
         return false;
@@ -4181,6 +4168,7 @@ pub const Blob = struct {
         } else if (duped.content_type_allocated and duped.allocator != null and include_content_type) {
             duped.content_type = bun.default_allocator.dupe(u8, this.content_type) catch bun.outOfMemory();
         }
+        duped.name = duped.name.dupeRef();
 
         duped.allocator = null;
         return duped;

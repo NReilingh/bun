@@ -484,6 +484,7 @@ pub const Task = TaggedPointerUnion(.{
     RuntimeTranspilerStore,
     ServerAllConnectionsClosedTask,
     bun.bake.DevServer.HotReloadTask,
+    bun.bundle_v2.DeferredBatchTask,
 });
 const UnboundedQueue = @import("./unbounded_queue.zig").UnboundedQueue;
 pub const ConcurrentTask = struct {
@@ -545,6 +546,7 @@ pub const GarbageCollectionController = struct {
         const actual = uws.Loop.get();
         this.gc_timer = uws.Timer.createFallthrough(actual, this);
         this.gc_repeating_timer = uws.Timer.createFallthrough(actual, this);
+        actual.internal_loop_data.jsc_vm = vm.jsc;
 
         if (comptime Environment.isDebug) {
             if (bun.getenvZ("BUN_TRACK_LAST_FN_NAME") != null) {
@@ -1249,6 +1251,10 @@ pub const EventLoop = struct {
                 @field(Task.Tag, typeBaseName(@typeName(ServerAllConnectionsClosedTask))) => {
                     var any: *ServerAllConnectionsClosedTask = task.get(ServerAllConnectionsClosedTask).?;
                     any.runFromJSThread(virtual_machine);
+                },
+                @field(Task.Tag, typeBaseName(@typeName(bun.bundle_v2.DeferredBatchTask))) => {
+                    var any: *bun.bundle_v2.DeferredBatchTask = task.get(bun.bundle_v2.DeferredBatchTask).?;
+                    any.runOnJSThread();
                 },
 
                 else => {

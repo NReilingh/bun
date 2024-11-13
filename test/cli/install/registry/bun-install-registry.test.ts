@@ -515,7 +515,7 @@ ${Object.keys(opts)
       dotEnv: { SECRET_AUTH: "" },
     },
     (stdout: string, stderr: string) => {
-      expect(stderr).toContain("got an empty string");
+      expect(stderr).toContain("received an empty string");
     },
   );
 });
@@ -639,6 +639,22 @@ describe("certificate authority", () => {
     expect(out).not.toContain("no-deps");
     const err = await Bun.readableStreamToText(stderr);
     expect(err).toContain(`HTTPThread: could not find CA file: '${join(packageDir, "does-not-exist")}'`);
+    expect(await exited).toBe(1);
+  });
+
+  test("non-existent --cafile (absolute path)", async () => {
+    await write(packageJson, JSON.stringify({ name: "foo", version: "1.0.0", "dependencies": { "no-deps": "1.1.1" } }));
+    const { stdout, stderr, exited } = spawn({
+      cmd: [bunExe(), "install", "--cafile", "/does/not/exist"],
+      cwd: packageDir,
+      stderr: "pipe",
+      stdout: "pipe",
+      env,
+    });
+    const out = await Bun.readableStreamToText(stdout);
+    expect(out).not.toContain("no-deps");
+    const err = await Bun.readableStreamToText(stderr);
+    expect(err).toContain(`HTTPThread: could not find CA file: '/does/not/exist'`);
     expect(await exited).toBe(1);
   });
 
@@ -2958,6 +2974,65 @@ describe("binaries", () => {
     expect(await file(join(packageDir, "bin-1.0.0.txt")).text()).toEqual("success!");
     expect(await file(join(packageDir, "bin-1.0.1.txt")).text()).toEqual("success!");
   });
+
+  test("will only link global binaries for requested packages", async () => {
+    await Promise.all([
+      write(
+        join(packageDir, "bunfig.toml"),
+        `
+      [install]
+      cache = false
+      registry = "http://localhost:${port}/"
+      globalBinDir = "${join(packageDir, "global-bin-dir").replace(/\\/g, "\\\\")}"
+      `,
+      ),
+      ,
+    ]);
+
+    let { stdout, stderr, exited } = spawn({
+      cmd: [bunExe(), "i", "-g", `--config=${join(packageDir, "bunfig.toml")}`, "uses-what-bin"],
+      cwd: packageDir,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...env, BUN_INSTALL: join(packageDir, "global-install-dir") },
+    });
+
+    let err = await Bun.readableStreamToText(stderr);
+    expect(err).not.toContain("error:");
+    let out = await Bun.readableStreamToText(stdout);
+    expect(out).toContain("uses-what-bin@1.5.0");
+    expect(await exited).toBe(0);
+
+    expect(await exists(join(packageDir, "global-bin-dir", "what-bin"))).toBeFalse();
+
+    ({ stdout, stderr, exited } = spawn({
+      cmd: [bunExe(), "i", "-g", `--config=${join(packageDir, "bunfig.toml")}`, "what-bin"],
+      cwd: packageDir,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...env, BUN_INSTALL: join(packageDir, "global-install-dir") },
+    }));
+
+    err = await Bun.readableStreamToText(stderr);
+    expect(err).not.toContain("error:");
+    out = await Bun.readableStreamToText(stdout);
+
+    expect(out).toContain("what-bin@1.5.0");
+    expect(await exited).toBe(0);
+
+    // now `what-bin` should be installed in the global bin directory
+    if (isWindows) {
+      expect(
+        await Promise.all([
+          exists(join(packageDir, "global-bin-dir", "what-bin.exe")),
+          exists(join(packageDir, "global-bin-dir", "what-bin.bunx")),
+        ]),
+      ).toEqual([true, true]);
+    } else {
+      expect(await exists(join(packageDir, "global-bin-dir", "what-bin"))).toBeTrue();
+    }
+  });
+
   for (const global of [false, true]) {
     test(`bin types${global ? " (global)" : ""}`, async () => {
       if (global) {
@@ -3054,6 +3129,69 @@ describe("binaries", () => {
     expect(err).not.toContain("error:");
     expect(await exited).toBe(0);
   });
+});
+
+test("it should invalid cached package if package.json is missing", async () => {
+  await Promise.all([
+    write(
+      packageJson,
+      JSON.stringify({
+        name: "foo",
+        dependencies: {
+          "no-deps": "2.0.0",
+        },
+      }),
+    ),
+  ]);
+
+  let { out } = await runBunInstall(env, packageDir);
+  expect(out).toContain("+ no-deps@2.0.0");
+
+  // node_modules and cache should be populated
+  expect(
+    await Promise.all([
+      readdirSorted(join(packageDir, "node_modules", "no-deps")),
+      readdirSorted(join(packageDir, ".bun-cache", "no-deps@2.0.0@@localhost@@@1")),
+    ]),
+  ).toEqual([
+    ["index.js", "package.json"],
+    ["index.js", "package.json"],
+  ]);
+
+  // with node_modules package.json deleted, the package should be reinstalled
+  await rm(join(packageDir, "node_modules", "no-deps", "package.json"));
+  ({ out } = await runBunInstall(env, packageDir, { savesLockfile: false }));
+  expect(out).toContain("+ no-deps@2.0.0");
+
+  // another install is a no-op
+  ({ out } = await runBunInstall(env, packageDir, { savesLockfile: false }));
+  expect(out).not.toContain("+ no-deps@2.0.0");
+
+  // with cache package.json deleted, install is a no-op and cache is untouched
+  await rm(join(packageDir, ".bun-cache", "no-deps@2.0.0@@localhost@@@1", "package.json"));
+  ({ out } = await runBunInstall(env, packageDir, { savesLockfile: false }));
+  expect(out).not.toContain("+ no-deps@2.0.0");
+  expect(
+    await Promise.all([
+      readdirSorted(join(packageDir, "node_modules", "no-deps")),
+      readdirSorted(join(packageDir, ".bun-cache", "no-deps@2.0.0@@localhost@@@1")),
+    ]),
+  ).toEqual([["index.js", "package.json"], ["index.js"]]);
+
+  // now with node_modules package.json deleted, the package AND the cache should
+  // be repopulated
+  await rm(join(packageDir, "node_modules", "no-deps", "package.json"));
+  ({ out } = await runBunInstall(env, packageDir, { savesLockfile: false }));
+  expect(out).toContain("+ no-deps@2.0.0");
+  expect(
+    await Promise.all([
+      readdirSorted(join(packageDir, "node_modules", "no-deps")),
+      readdirSorted(join(packageDir, ".bun-cache", "no-deps@2.0.0@@localhost@@@1")),
+    ]),
+  ).toEqual([
+    ["index.js", "package.json"],
+    ["index.js", "package.json"],
+  ]);
 });
 
 test("it should install with missing bun.lockb, node_modules, and/or cache", async () => {

@@ -208,9 +208,13 @@ pub const ZigString = extern struct {
     }
 
     pub fn encode(this: ZigString, encoding: JSC.Node.Encoding) []u8 {
+        return this.encodeWithAllocator(bun.default_allocator, encoding);
+    }
+
+    pub fn encodeWithAllocator(this: ZigString, allocator: std.mem.Allocator, encoding: JSC.Node.Encoding) []u8 {
         return switch (this.as()) {
             inline else => |repr| switch (encoding) {
-                inline else => |enc| JSC.WebCore.Encoder.constructFrom(std.meta.Child(@TypeOf(repr)), repr, enc),
+                inline else => |enc| JSC.WebCore.Encoder.constructFrom(std.meta.Child(@TypeOf(repr)), repr, allocator, enc),
             },
         };
     }
@@ -2982,6 +2986,11 @@ pub const JSGlobalObject = opaque {
         JSGlobalObject__throwOutOfMemoryError(this);
     }
 
+    pub fn throwOutOfMemoryValue(this: *JSGlobalObject) JSValue {
+        JSGlobalObject__throwOutOfMemoryError(this);
+        return .zero;
+    }
+
     pub fn throwTODO(this: *JSGlobalObject, msg: []const u8) void {
         const err = this.createErrorInstance("{s}", .{msg});
         err.put(this, ZigString.static("name"), bun.String.static("TODOError").toJS(this));
@@ -3750,7 +3759,6 @@ pub const JSValue = enum(JSValueReprInt) {
         MaxJS = 0b11111111,
         Event = 0b11101111,
         DOMWrapper = 0b11101110,
-        Blob = 0b11111100,
 
         /// This means that we don't have Zig bindings for the type yet, but it
         /// implements .toJSON()
@@ -4008,6 +4016,12 @@ pub const JSValue = enum(JSValueReprInt) {
         return JSC__JSValue__getDirectIndex(this, globalThis, i);
     }
 
+    pub fn isFalsey(this: JSValue) bool {
+        return !this.toBoolean();
+    }
+
+    pub const isTruthy = toBoolean;
+
     const PropertyIteratorFn = *const fn (
         globalObject_: *JSGlobalObject,
         ctx_ptr: ?*anyopaque,
@@ -4058,7 +4072,7 @@ pub const JSValue = enum(JSValueReprInt) {
     pub fn coerce(this: JSValue, comptime T: type, globalThis: *JSC.JSGlobalObject) T {
         return switch (T) {
             ZigString => this.getZigString(globalThis),
-            bool => this.toBooleanSlow(globalThis),
+            bool => this.toBoolean(),
             f64 => {
                 if (this.isDouble()) {
                     return this.asDouble();
@@ -4305,14 +4319,18 @@ pub const JSValue = enum(JSValueReprInt) {
 
             return ZigType.fromJS(value);
         }
-
-        return JSC.GetJSPrivateData(ZigType, value.asObjectRef());
     }
 
     extern fn JSC__JSValue__dateInstanceFromNullTerminatedString(*JSGlobalObject, [*:0]const u8) JSValue;
     pub fn fromDateString(globalObject: *JSGlobalObject, str: [*:0]const u8) JSValue {
         JSC.markBinding(@src());
         return JSC__JSValue__dateInstanceFromNullTerminatedString(globalObject, str);
+    }
+
+    extern fn JSC__JSValue__dateInstanceFromNumber(*JSGlobalObject, f64) JSValue;
+    pub fn fromDateNumber(globalObject: *JSGlobalObject, value: f64) JSValue {
+        JSC.markBinding(@src());
+        return JSC__JSValue__dateInstanceFromNumber(globalObject, value);
     }
 
     extern fn JSBuffer__isBuffer(*JSGlobalObject, JSValue) bool;
@@ -4327,13 +4345,6 @@ pub const JSValue = enum(JSValueReprInt) {
 
     pub fn isDate(this: JSValue) bool {
         return this.jsType() == .JSDate;
-    }
-
-    pub fn asCheckLoaded(value: JSValue, comptime ZigType: type) ?*ZigType {
-        if (!ZigType.Class.isLoaded() or value.isUndefinedOrNull())
-            return null;
-
-        return JSC.GetJSPrivateData(ZigType, value.asObjectRef());
     }
 
     pub fn protect(this: JSValue) void {
@@ -5166,6 +5177,7 @@ pub const JSValue = enum(JSValueReprInt) {
         message,
         @"error",
         default,
+        encoding,
 
         pub fn has(property: []const u8) bool {
             return bun.ComptimeEnumMap(BuiltinName).has(property);
@@ -5279,6 +5291,13 @@ pub const JSValue = enum(JSValueReprInt) {
     pub fn getOwn(this: JSValue, global: *JSGlobalObject, property_name: anytype) ?JSValue {
         var property_name_str = bun.String.init(property_name);
         const value = JSC__JSValue__getOwn(this, global, &property_name_str);
+        return if (@intFromEnum(value) != 0) value else return null;
+    }
+
+    extern fn JSC__JSValue__getOwnByValue(value: JSValue, globalObject: *JSGlobalObject, propertyValue: JSValue) JSValue;
+
+    pub fn getOwnByValue(this: JSValue, global: *JSGlobalObject, property_value: JSValue) ?JSValue {
+        const value = JSC__JSValue__getOwnByValue(this, global, property_value);
         return if (@intFromEnum(value) != 0) value else return null;
     }
 
@@ -5621,6 +5640,12 @@ pub const JSValue = enum(JSValueReprInt) {
         });
     }
 
+    extern fn JSC__JSValue__getUTCTimestamp(globalObject: *JSC.JSGlobalObject, this: JSValue) f64;
+    /// Calls getTime() - getUTCT
+    pub fn getUTCTimestamp(this: JSValue, globalObject: *JSC.JSGlobalObject) f64 {
+        return JSC__JSValue__getUTCTimestamp(globalObject, this);
+    }
+
     pub const StringFormatter = struct {
         value: JSC.JSValue,
         globalObject: *JSC.JSGlobalObject,
@@ -5714,16 +5739,8 @@ pub const JSValue = enum(JSValueReprInt) {
         return fromPtrAddress(@intFromPtr(addr));
     }
 
-    pub fn toBooleanSlow(this: JSValue, global: *JSGlobalObject) bool {
-        return cppFn("toBooleanSlow", .{ this, global });
-    }
-
     pub fn toBoolean(this: JSValue) bool {
-        if (isEmptyOrUndefinedOrNull(this)) {
-            return false;
-        }
-
-        return asBoolean(this);
+        return this != .zero and cppFn("toBoolean", .{this});
     }
 
     pub fn asBoolean(this: JSValue) bool {
@@ -6013,7 +6030,6 @@ pub const JSValue = enum(JSValueReprInt) {
         "symbolFor",
         "symbolKeyFor",
         "toBoolean",
-        "toBooleanSlow",
         "toError_",
         "toInt32",
         "toInt64",
@@ -6160,6 +6176,22 @@ pub const VM = extern struct {
         SmallHeap = 0,
         LargeHeap = 1,
     };
+
+    extern fn Bun__JSC_onBeforeWait(vm: *VM) i32;
+    extern fn Bun__JSC_onAfterWait(vm: *VM) void;
+    pub const ReleaseHeapAccess = struct {
+        vm: *VM,
+        needs_to_release: bool,
+        pub fn acquire(this: *const ReleaseHeapAccess) void {
+            if (this.needs_to_release) {
+                Bun__JSC_onAfterWait(this.vm);
+            }
+        }
+    };
+
+    pub fn releaseHeapAccess(vm: *VM) ReleaseHeapAccess {
+        return .{ .vm = vm, .needs_to_release = Bun__JSC_onBeforeWait(vm) != 0 };
+    }
 
     pub fn create(heap_type: HeapType) *VM {
         return cppFn("create", .{@intFromEnum(heap_type)});
